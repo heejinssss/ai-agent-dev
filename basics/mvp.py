@@ -1,68 +1,81 @@
-# MVP 실습
+from datetime import datetime
 
-# 환경 설정: .env 파일에서 API 키를 로드합니다.
-from dotenv import load_dotenv
-import os
+from langchain_core.tools import tool
 
-load_dotenv()
-assert os.environ.get("OPENAI_API_KEY"), "OPENAI_API_KEY가 설정되지 않았습니다!"
-print("환경 설정 완료")
-
-# Observability 설정 (선택) - LangSmith 또는 Langfuse
-# .env에 키를 설정하거나, 아래 주석을 해제하여 직접 입력하세요.
-# os.environ["LANGFUSE_SECRET_KEY"] = "sk-lf-..."
-# os.environ["LANGFUSE_PUBLIC_KEY"] = "pk-lf-..."
-# os.environ["LANGFUSE_HOST"] = "https://lf.ddok.ai"
-
-# LangSmith: LANGSMITH_TRACING=true 시 자동 활성화 (코드 수정 불필요)
-if os.environ.get("LANGSMITH_TRACING", "").lower() == "true":
-    os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
-    os.environ.setdefault("LANGCHAIN_API_KEY", os.environ.get("LANGSMITH_API_KEY", ""))
-    os.environ.setdefault("LANGCHAIN_PROJECT", os.environ.get("LANGSMITH_PROJECT", "default"))
-    print(f"LangSmith tracing ON — project: {os.environ['LANGCHAIN_PROJECT']}")
-
-# Langfuse: invoke/stream 호출 시 config={"callbacks": [langfuse_handler]} 전달
-langfuse_handler = None
-if os.environ.get("LANGFUSE_SECRET_KEY"):
-    from langfuse.langchain import CallbackHandler
-    langfuse_handler = CallbackHandler()
-    print(f"Langfuse tracing ON — {os.environ.get('LANGFUSE_HOST', '')}")
-# Langfuse config: pass to invoke/stream/batch calls
-lf_config = {"callbacks": [langfuse_handler]} if langfuse_handler else {}
-
-# uv add langchain_community
-
+# import 추가
+# ==========================================================================
 from langchain_community.document_loaders import TextLoader
-
-file_path = "./log.txt"
-loader = TextLoader(file_path, encoding="utf-8")
-logs = loader.load()
-logs
-
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.documents import Document
 
-# 샘플 문서 생성 — 실제 환경에서는 PDF, 웹 등에서 로드합니다.
-# Document 객체는 page_content(본문)와 metadata(출처 등)로 구성됩니다.
-raw_docs = [
-    Document(page_content="LangGraph는 LLM으로 상태 기반 멀티 액터 "
-        "애플리케이션을 구축하기 위한 프레임워크입니다.",
-        metadata={"source": "langgraph-docs"}),
-    Document(page_content="에이전트는 도구를 사용하여 외부 시스템과 "
-        "상호작용합니다. ReAct 패턴은 추론과 행동을 번갈아 수행합니다.",
-        metadata={"source": "agent-guide"}),
-]
-print(f"문서 {len(raw_docs)}개 로드됨.")
-# RecursiveCharacterTextSplitter: 문서를 의미 단위로 분할합니다.
-# chunk_size: 각 청크의 최대 문자 수 (1000자)
-# chunk_overlap: 인접 청크 간 겹치는 문자 수 (200자) — 경계 부분의 정보 손실 방지
-text_splitter = RecursiveCharacterTextSplitter(
-    # chunk_size=10, chunk_overlap=5,
-    chunk_size=1000, chunk_overlap=200,
-)
-splits = text_splitter.split_documents(logs)
+import base64
 
-# 분할 결과 확인: 각 청크의 앞부분을 출력합니다.
-for i, doc in enumerate(splits):
-    print(f"청크 {i}: {doc.page_content[:60]}...")
-print(f"총 청크 수: {len(splits)}")
+from pathlib import Path
+
+from email.message import EmailMessage
+
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+# ==========================================================================
+
+
+# path 및 공통변수 선언
+# ==========================================================================
+BASE_DIR = Path(__file__).parent.parent
+TOKEN_PATH = BASE_DIR / 'token.json'
+CREDS_PATH = BASE_DIR / 'credentials.json'
+SCOPES = ['https://mail.google.com/']
+# ==========================================================================
+
+
+@tool
+def read_log() -> str:
+    """로그 파일을 읽어서 내용을 반환합니다. 테스트 로그 파일의 경로는 고정되어 있습니다."""
+    file_path = "./logs.txt"
+    loader = TextLoader(file_path, encoding="utf-8")
+    logs = loader.load()
+
+    text_splitter = RecursiveCharacterTextSplitter(
+        separators=["\n"],
+        chunk_size=1000,
+        chunk_overlap=0,
+    )
+
+    splits = text_splitter.split_documents(logs)
+
+    return splits
+
+
+@tool
+def send_email(subject: str, body: str) -> str:
+    """이메일을 담당자에게 전송합니다.
+
+    Args:
+        subject: 이메일 제목 ("[품질설계 에러 발생 (긴급도 상)] 에러 요약")
+        body: 이메일 본문 (에러 분석 내용)
+    """
+    creds = None
+    if TOKEN_PATH.is_file():
+        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open(TOKEN_PATH, 'w') as token:
+            token.write(creds.to_json())
+
+    service = build('gmail', 'v1', credentials=creds)
+
+    message = EmailMessage()
+    message["From"] = "baebbang0424@gmail.com"
+    message["To"] = "baebbang0424@gmail.com"
+    message["Subject"] = subject
+    message.set_content(body)
+
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode('utf8')
+    service.users().messages().send(userId="me", body={"raw": raw}).execute()
+
+    return f"이메일 전송 완료: {subject}"
